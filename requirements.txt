@@ -1,0 +1,30 @@
+# FastAPI + server
+fastapi==0.111.0          # Async-native Python web framework; chosen over Flask because it natively supports async/await, which is critical for non-blocking FAISS + Redis I/O
+uvicorn[standard]==0.30.1 # ASGI server; required by FastAPI; 'standard' includes uvloop for max throughput
+
+# LangChain ecosystem
+langchain==0.2.6                  # Agent orchestration; chosen for its native function-calling abstractions and retriever interface contracts
+langchain-community==0.2.6        # Community retrievers and tool integrations
+langchain-openai==0.1.13          # OpenAI LLM backend for the agent's reasoning layer
+openai==1.35.3                    # Direct OpenAI SDK; LangChain delegates to this under the hood
+
+# Embeddings (CLIP)
+transformers==4.42.3              # Hugging Face Transformers; the only library that ships a production-grade CLIP implementation with both vision and text towers
+torch==2.3.1                      # PyTorch; CLIP models are natively PyTorch — TensorFlow ports lag behind and lack quantization support
+Pillow==10.3.0                    # Image loading/preprocessing; required by CLIP's processor pipeline
+
+# Vector store
+faiss-cpu==1.8.0                  # Facebook AI Similarity Search; chosen over Pinecone/Weaviate because it runs ENTIRELY locally (no network hop), supports billion-scale ANN search, and is deterministic — critical for reproducible retrieval benchmarks. Use faiss-gpu if CUDA available.
+
+# Caching
+redis==5.0.7                      # Redis Python client; chosen because Redis is the only cache that supports sub-millisecond latency at 50k-document scale with native TTL and serialization
+
+# Database
+psycopg2-binary==2.9.9            # PostgreSQL adapter; chosen over SQLite because metadata queries (filtering by doc_type, date, source) benefit from PostgreSQL's GIN/BRIN indexes and JSON column support
+sqlalchemy==2.0.31                # ORM; async-compatible with PostgreSQL, avoids raw SQL injection risk
+
+# Utilities
+numpy==1.26.4                     # Required by FAISS for vector operations
+python-dotenv==1.0.1              # Loads .env config; keeps secrets out of source
+pydantic==2.7.4                   # Request/response validation; FastAPI's native schema layer
+httpx==0.27.0                     # Async HTTP client for internal health checks
