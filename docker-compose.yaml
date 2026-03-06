@@ -1,0 +1,125 @@
+# ── Why Docker Compose and not Kubernetes? ───────────────────────────────────
+# Unity clusters typically provision single EC2 instances per project (not a
+# K8s cluster). Compose gives you multi-service orchestration, named networks,
+# volume mounts, and health checks without the K8s control-plane overhead.
+# If Unity uses ECS or EKS, this Compose file maps 1:1 to a task definition.
+# ─────────────────────────────────────────────────────────────────────────────
+version: "3.9"
+
+services:
+
+  # ── FastAPI RAG Application ─────────────────────────────────────────────────
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: multimodal_rag_app
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      # FAISS index persists across restarts — rebuilding a 50k-doc index takes
+      # ~15 min; we never want to redo this on container restart
+      - faiss_data:/app/data
+      # HuggingFace CLIP model weights cached locally — avoids re-downloading
+      # 600MB on every container restart (critical on Unity's metered egress)
+      - model_cache:/app/model_cache
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - rag_net
+    deploy:
+      resources:
+        limits:
+          memory: 8G      # CLIP ViT-B/32 + FAISS index fits in ~4GB; 8GB gives headroom
+          cpus: "4.0"
+
+  # ── Redis Cache ─────────────────────────────────────────────────────────────
+  # Why Redis and not Memcached?
+  # Redis supports native TTL per key, persistence (RDB snapshots), and
+  # structured types (hashes for storing query+embedding together).
+  # Memcached only does raw string blobs with no per-key TTL.
+  redis:
+    image: redis:7.2-alpine   # Alpine base = 30MB image; Redis itself is single-binary
+    container_name: multimodal_rag_redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --maxmemory 2gb
+      --maxmemory-policy allkeys-lru
+      --save 60 1000
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - rag_net
+
+  # ── PostgreSQL Metadata Store ────────────────────────────────────────────────
+  # Why PostgreSQL and not MySQL or SQLite?
+  # PostgreSQL's JSONB column type with GIN indexing lets us filter metadata
+  # (e.g., doc_type='image', source='arxiv', date_range) in a single indexed
+  # scan. MySQL's JSON support is read-only indexed (no GIN). SQLite doesn't
+  # support concurrent writes from multiple uvicorn workers.
+  postgres:
+    image: postgres:16-alpine
+    container_name: multimodal_rag_postgres
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres_init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - rag_net
+
+  # ── Nginx Reverse Proxy ──────────────────────────────────────────────────────
+  # Why Nginx in front of uvicorn?
+  # Uvicorn should NOT be exposed directly to the internet. Nginx handles:
+  # (1) TLS termination, (2) rate limiting (100 req/min per IP),
+  # (3) request buffering so slow clients don't hold uvicorn threads,
+  # (4) static file serving for any frontend assets.
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: multimodal_rag_nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./infra/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - app
+    networks:
+      - rag_net
+
+volumes:
+  faiss_data:
+  model_cache:
+  redis_data:
+  postgres_data:
+
+networks:
+  rag_net:
+    driver: bridge
