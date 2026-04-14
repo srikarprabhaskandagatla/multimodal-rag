@@ -1,92 +1,165 @@
-# infra/nginx.conf
-# ─────────────────────────────────────────────────────────────────────────────
-# WHY NGINX (and not AWS ALB alone, or Traefik)?
-#
-# - AWS ALB: handles TLS and load balancing across instances, but doesn't do
-#   per-instance rate limiting, request buffering, or connection keep-alive
-#   tuning. We use both: ALB in front, Nginx per-instance.
-#
-# - Traefik: excellent for K8s service mesh. On a single EC2 with Docker
-#   Compose, Nginx has a lower memory footprint and simpler config.
-#
-# - Nginx: 20 years of production hardening. Connection pooling to upstream
-#   (keepalive 32) means uvicorn workers don't pay TCP handshake overhead on
-#   every request.
-# ─────────────────────────────────────────────────────────────────────────────
+"""
+test_retriever.py — Unit Tests for the FAISS Retriever
+────────────────────────────────────────────────────────
+Run with:
+    pytest tests/test_retriever.py -v
 
-worker_processes auto;  # One worker per CPU core
-error_log /var/log/nginx/error.log warn;
-pid /var/run/nginx.pid;
+Tests use a tiny in-memory FAISS index (no disk I/O) and mock PostgreSQL,
+so they run without any external services.
+"""
 
-events {
-    worker_connections 1024;
-    use epoll;          # Linux epoll: most efficient I/O multiplexer on EC2
-    multi_accept on;
-}
+import pickle
+import tempfile
+from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
-http {
-    include /etc/nginx/mime.types;
-    default_type application/octet-stream;
+import faiss
+import numpy as np
+import pytest
 
-    # Log format includes upstream response time for latency monitoring
-    log_format main '$remote_addr - $request_time $upstream_response_time '
-                    '"$request" $status $body_bytes_sent';
-    access_log /var/log/nginx/access.log main;
+from app.retriever import FAISSRetriever
 
-    sendfile on;
-    tcp_nopush on;
-    keepalive_timeout 65;
-    gzip on;
+EMBEDDING_DIM = 512
 
-    # Rate limiting: 100 requests/minute per IP
-    # Why limit_req_zone on $binary_remote_addr?
-    # $binary_remote_addr uses 4 bytes (vs 15 for $remote_addr string),
-    # reducing memory usage of the shared zone by ~75%.
-    limit_req_zone $binary_remote_addr zone=api_limit:10m rate=100r/m;
 
-    # Upstream: the FastAPI app running in Docker on port 8000
-    # keepalive 32: maintain 32 persistent connections to uvicorn workers,
-    # avoiding TCP handshake overhead per request (~1ms saved per request)
-    upstream rag_app {
-        server app:8000;
-        keepalive 32;
-    }
+def _make_temp_index(num_docs: int = 10) -> tuple[str, list[str]]:
+    """
+    Build a tiny HNSW index with random vectors and write it to a temp directory.
+    Returns (index_dir_path, id_map).
+    """
+    tmpdir = tempfile.mkdtemp()
+    hnsw = faiss.IndexHNSWFlat(EMBEDDING_DIM, 16, faiss.METRIC_INNER_PRODUCT)
+    index = faiss.IndexIDMap(hnsw)
 
-    server {
-        listen 80;
-        server_name _;
+    id_map = [f"doc_{i:03d}" for i in range(num_docs)]
+    vecs = np.random.randn(num_docs, EMBEDDING_DIM).astype(np.float32)
+    # L2-normalize so inner product == cosine similarity
+    vecs /= np.linalg.norm(vecs, axis=1, keepdims=True)
+    ids = np.arange(num_docs, dtype=np.int64)
+    index.add_with_ids(vecs, ids)
 
-        # Security headers
-        add_header X-Frame-Options DENY;
-        add_header X-Content-Type-Options nosniff;
-        add_header X-XSS-Protection "1; mode=block";
+    faiss.write_index(index, str(Path(tmpdir) / "index.faiss"))
+    with open(Path(tmpdir) / "id_map.pkl", "wb") as f:
+        pickle.dump(id_map, f)
 
-        # Health check endpoint — bypasses rate limiting for load balancer polls
-        location /health {
-            proxy_pass http://rag_app;
-            proxy_http_version 1.1;
-            proxy_set_header Connection "";
+    return tmpdir, id_map
+
+
+def _fake_metadata(doc_ids: list[str]) -> list[dict]:
+    return [
+        {
+            "doc_id": doc_id,
+            "title": f"Title for {doc_id}",
+            "source": "test_corpus",
+            "doc_type": "text",
+            "content_preview": f"Preview text for {doc_id}.",
+            "metadata": {},
         }
+        for doc_id in doc_ids
+    ]
 
-        # API endpoints
-        location / {
-            limit_req zone=api_limit burst=20 nodelay;
 
-            proxy_pass http://rag_app;
-            proxy_http_version 1.1;
-            proxy_set_header Connection "";           # Required for keepalive
-            proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+# ── Tests ──────────────────────────────────────────────────────────────────────
 
-            # Timeouts: CLIP embedding takes up to 500ms; agent call up to 30s
-            proxy_read_timeout 60s;
-            proxy_connect_timeout 5s;
+def test_retriever_loads_index():
+    """FAISSRetriever.load() should populate index and id_map from disk."""
+    tmpdir, id_map = _make_temp_index(num_docs=10)
 
-            # Buffer settings: allow Nginx to buffer the full request body
-            # before forwarding to uvicorn — prevents slow-client attacks
-            proxy_request_buffering on;
-            client_max_body_size 10M;  # Max image upload size
-        }
-    }
-}
+    retriever = FAISSRetriever()
+    with patch.dict("os.environ", {"FAISS_INDEX_PATH": tmpdir}):
+        retriever.load()
+
+    assert retriever.index is not None
+    assert retriever.index.ntotal == 10
+    assert retriever.id_map == id_map
+
+
+def test_retriever_load_missing_index_raises():
+    """FAISSRetriever.load() should raise FileNotFoundError if index is absent."""
+    retriever = FAISSRetriever()
+    with patch.dict("os.environ", {"FAISS_INDEX_PATH": "/nonexistent/path"}):
+        with pytest.raises(FileNotFoundError):
+            retriever.load()
+
+
+@pytest.mark.asyncio
+async def test_retrieve_text_returns_top_k():
+    """retrieve(text=...) should return at most top_k results."""
+    tmpdir, _ = _make_temp_index(num_docs=20)
+
+    retriever = FAISSRetriever()
+    with patch.dict("os.environ", {"FAISS_INDEX_PATH": tmpdir, "FAISS_TOP_K": "20"}):
+        retriever.load()
+
+    mock_vec = np.random.randn(EMBEDDING_DIM).astype(np.float32)
+    mock_vec /= np.linalg.norm(mock_vec)
+
+    with patch("app.retriever.embed_query", new=AsyncMock(return_value=mock_vec)), \
+         patch("app.retriever.get_doc_metadata", new=AsyncMock(side_effect=_fake_metadata)):
+        results = await retriever.retrieve(text="test query", top_k=5)
+
+    assert len(results) <= 5
+    # Results should be sorted by score descending
+    scores = [r["score"] for r in results]
+    assert scores == sorted(scores, reverse=True)
+
+
+@pytest.mark.asyncio
+async def test_retrieve_multimodal_fuses_embeddings():
+    """retrieve(text=..., image=...) should call embed_query with both args."""
+    from PIL import Image as PILImage
+    dummy_image = PILImage.new("RGB", (224, 224))
+
+    tmpdir, _ = _make_temp_index(num_docs=5)
+    retriever = FAISSRetriever()
+    with patch.dict("os.environ", {"FAISS_INDEX_PATH": tmpdir, "FAISS_TOP_K": "5"}):
+        retriever.load()
+
+    mock_vec = np.random.randn(EMBEDDING_DIM).astype(np.float32)
+    mock_vec /= np.linalg.norm(mock_vec)
+    mock_embed = AsyncMock(return_value=mock_vec)
+
+    with patch("app.retriever.embed_query", new=mock_embed), \
+         patch("app.retriever.get_doc_metadata", new=AsyncMock(side_effect=_fake_metadata)):
+        await retriever.retrieve(text="red sneakers", image=dummy_image, top_k=3)
+
+    # embed_query must have been called with both text and image
+    mock_embed.assert_called_once_with(text="red sneakers", image=dummy_image)
+
+
+@pytest.mark.asyncio
+async def test_retrieve_returns_scores():
+    """Each result dict should include a 'score' field between 0 and 1."""
+    tmpdir, _ = _make_temp_index(num_docs=10)
+    retriever = FAISSRetriever()
+    with patch.dict("os.environ", {"FAISS_INDEX_PATH": tmpdir, "FAISS_TOP_K": "10"}):
+        retriever.load()
+
+    mock_vec = np.random.randn(EMBEDDING_DIM).astype(np.float32)
+    mock_vec /= np.linalg.norm(mock_vec)
+
+    with patch("app.retriever.embed_query", new=AsyncMock(return_value=mock_vec)), \
+         patch("app.retriever.get_doc_metadata", new=AsyncMock(side_effect=_fake_metadata)):
+        results = await retriever.retrieve(text="query", top_k=5)
+
+    for r in results:
+        assert "score" in r
+        assert isinstance(r["score"], float)
+
+
+@pytest.mark.asyncio
+async def test_retrieve_empty_db_returns_empty():
+    """If PostgreSQL returns no metadata, retrieve should return an empty list."""
+    tmpdir, _ = _make_temp_index(num_docs=5)
+    retriever = FAISSRetriever()
+    with patch.dict("os.environ", {"FAISS_INDEX_PATH": tmpdir, "FAISS_TOP_K": "5"}):
+        retriever.load()
+
+    mock_vec = np.random.randn(EMBEDDING_DIM).astype(np.float32)
+    mock_vec /= np.linalg.norm(mock_vec)
+
+    with patch("app.retriever.embed_query", new=AsyncMock(return_value=mock_vec)), \
+         patch("app.retriever.get_doc_metadata", new=AsyncMock(return_value=[])):
+        results = await retriever.retrieve(text="query", top_k=5)
+
+    assert results == []

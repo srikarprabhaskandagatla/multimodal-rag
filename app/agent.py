@@ -26,12 +26,13 @@ and schema-validated.
 """
 
 import json
+import os
 from typing import Any
 
 from langchain.agents import AgentExecutor, create_openai_tools_agent
 from langchain.tools import tool
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_openai import ChatOpenAI
+from langchain_openai import AzureChatOpenAI
 
 from app.retriever import get_retriever
 from app.cache import get_cached, set_cached
@@ -151,8 +152,11 @@ def build_agent() -> AgentExecutor:
     chooses between tools based on query modality in >95% of cases in our
     evals. GPT-3.5-turbo misroutes ~18% of image queries to the text tool.
     """
-    llm = ChatOpenAI(
-        model="gpt-4o",
+    llm = AzureChatOpenAI(
+        azure_deployment=os.environ["AZURE_OPENAI_DEPLOYMENT"],   # e.g. "gpt-4o"
+        azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],       # e.g. "https://your-resource.openai.azure.com/"
+        api_key=os.environ["AZURE_OPENAI_API_KEY"],
+        api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-01"),
         temperature=0,        # Zero temperature: routing decisions must be deterministic
         max_tokens=1000,
         request_timeout=30,

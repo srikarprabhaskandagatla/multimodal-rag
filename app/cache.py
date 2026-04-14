@@ -1,115 +1,102 @@
 """
-embeddings.py — CLIP Embedding Wrapper
-───────────────────────────────────────
-WHY CLIP (and not OpenAI text-embedding-3, SBERT, or BLIP)?
+cache.py — Redis Query Cache
+─────────────────────────────
+WHY REDIS (and not Memcached or an in-process dict)?
 
-- CLIP (Contrastive Language-Image Pretraining) maps BOTH images and text into
-  the SAME 512-dimensional vector space. This is the only property that makes
-  multimodal retrieval possible: "a golden retriever" as text and a photo of a
-  golden retriever will be geometrically close in CLIP space.
+- In-process dict: not shared across uvicorn workers. Worker A caches a result
+  that Worker B never sees — cache hit rate ~25% with 4 workers.
 
-- OpenAI text-embedding-3: text-only. No image tower. Disqualified.
+- Memcached: no per-key TTL, no persistence. If the pod restarts, all cached
+  embeddings are lost — next request pays full CLIP + FAISS cost again.
 
-- SBERT (Sentence-BERT): text-only, no vision encoder.
+- Redis: shared across all workers via TCP, native per-key TTL, RDB snapshots
+  for persistence across restarts, and sub-millisecond latency on a local
+  network. The correct choice for a multi-worker async ML API.
 
-- BLIP/BLIP-2: better at captioning and VQA, but its joint embedding space is
-  not as well-calibrated for retrieval as CLIP's contrastive pretraining.
-
-- We use HuggingFace's `transformers` implementation (not OpenAI's CLIP API)
-  because (a) it runs locally (no per-call cost), (b) weights are cached once
-  and reused, (c) we can run it synchronously inside a thread pool executor
-  without API rate limits.
+CACHE KEY DESIGN:
+  "rag:{text_hash}:{has_image}"
+  - SHA-256 of the text query (fixed-length, safe for any input)
+  - has_image flag distinguishes text-only from multimodal queries with same text
+  - TTL: 3600s (1 hour) — hot queries re-embed frequently; stale after 1h
 """
 
-import asyncio
+import hashlib
+import json
+import logging
 import os
-from functools import lru_cache
-from typing import Union
+from typing import Any
 
-import numpy as np
-import torch
-from PIL import Image
-from transformers import CLIPModel, CLIPProcessor
+import redis.asyncio as aioredis
 
-CLIP_MODEL_NAME = os.getenv("CLIP_MODEL_NAME", "openai/clip-vit-base-patch32")
+logger = logging.getLogger(__name__)
+
+REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+CACHE_TTL = int(os.getenv("CACHE_TTL_SECONDS", "3600"))
+
+# Module-level async Redis client — created once, shared across all requests
+# in the worker process. redis.asyncio is non-blocking and coroutine-safe.
+_redis_client: aioredis.Redis | None = None
 
 
-@lru_cache(maxsize=1)
-def _load_clip():
+def _get_redis() -> aioredis.Redis:
+    global _redis_client
+    if _redis_client is None:
+        _redis_client = aioredis.Redis(
+            host=REDIS_HOST,
+            port=REDIS_PORT,
+            decode_responses=True,  # Return str, not bytes
+            socket_connect_timeout=2,
+            socket_timeout=2,
+        )
+    return _redis_client
+
+
+def _make_cache_key(text: str | None, has_image: bool) -> str:
     """
-    Load CLIP model and processor once, cache in memory for the process lifetime.
-
-    Why lru_cache(maxsize=1)?
-    Loading CLIP (600MB) takes ~8 seconds. With 4 uvicorn workers each forked
-    from the same parent process, lru_cache ensures the model is loaded exactly
-    once per worker process — not once per request.
+    Build a deterministic cache key from query parameters.
+    SHA-256 keeps the key short and safe regardless of query length or content.
     """
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = CLIPModel.from_pretrained(CLIP_MODEL_NAME).to(device)
-    processor = CLIPProcessor.from_pretrained(CLIP_MODEL_NAME)
-    model.eval()  # Disable dropout; we're always in inference mode
-    return model, processor, device
+    raw = f"{text or ''}:{has_image}"
+    digest = hashlib.sha256(raw.encode()).hexdigest()[:16]
+    return f"rag:{digest}:{int(has_image)}"
 
 
-def _embed_text_sync(text: str) -> np.ndarray:
-    model, processor, device = _load_clip()
-    inputs = processor(text=[text], return_tensors="pt", padding=True, truncation=True).to(device)
-    with torch.no_grad():
-        features = model.get_text_features(**inputs)
-    # L2-normalize so cosine similarity == dot product (FAISS IndexFlatIP)
-    vec = features.cpu().numpy()[0]
-    return vec / np.linalg.norm(vec)
-
-
-def _embed_image_sync(image: Image.Image) -> np.ndarray:
-    model, processor, device = _load_clip()
-    inputs = processor(images=image, return_tensors="pt").to(device)
-    with torch.no_grad():
-        features = model.get_image_features(**inputs)
-    vec = features.cpu().numpy()[0]
-    return vec / np.linalg.norm(vec)
-
-
-async def embed_text(text: str) -> np.ndarray:
+async def get_cached(
+    text: str | None,
+    has_image: bool,
+) -> list[dict[str, Any]] | None:
     """
-    Async wrapper around synchronous CLIP text encoding.
-
-    Why run_in_executor and not just async?
-    PyTorch's forward pass releases the GIL only partially. We offload it to a
-    ThreadPoolExecutor so FastAPI's event loop is never blocked. This keeps the
-    API responsive while embeddings are being computed.
+    Look up cached retrieval results for this query.
+    Returns None on cache miss or any Redis error (fail-open: never block a query).
     """
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _embed_text_sync, text)
+    try:
+        client = _get_redis()
+        key = _make_cache_key(text, has_image)
+        value = await client.get(key)
+        if value:
+            logger.debug("Cache hit for key %s", key)
+            return json.loads(value)
+        return None
+    except Exception as e:
+        # Redis errors must never crash the API — log and proceed without cache
+        logger.warning("Redis get failed (key=%s): %s", key, e)
+        return None
 
 
-async def embed_image(image: Image.Image) -> np.ndarray:
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _embed_image_sync, image)
-
-
-async def embed_query(
-    text: str | None = None,
-    image: Image.Image | None = None
-) -> np.ndarray:
+async def set_cached(
+    text: str | None,
+    has_image: bool,
+    results: list[dict[str, Any]],
+) -> None:
     """
-    Fuse text and image embeddings for multimodal queries.
-
-    Strategy: element-wise average of L2-normalized vectors, then re-normalize.
-    Why average and not concatenation?
-    - FAISS indexes a fixed-dimension space (512 for ViT-B/32). Concatenation
-      would double dimensions to 1024, invalidating any pre-built index.
-    - Averaging stays in CLIP's joint embedding space, preserving cosine
-      similarity semantics.
+    Store retrieval results in Redis with TTL.
+    Fails silently — a cache write error should never fail the user's request.
     """
-    if text and image:
-        t_vec = await embed_text(text)
-        i_vec = await embed_image(image)
-        fused = (t_vec + i_vec) / 2.0
-        return fused / np.linalg.norm(fused)
-    elif text:
-        return await embed_text(text)
-    elif image:
-        return await embed_image(image)
-    else:
-        raise ValueError("At least one of text or image must be provided.")
+    try:
+        client = _get_redis()
+        key = _make_cache_key(text, has_image)
+        await client.setex(key, CACHE_TTL, json.dumps(results, default=str))
+        logger.debug("Cached %d results for key %s (TTL=%ds)", len(results), key, CACHE_TTL)
+    except Exception as e:
+        logger.warning("Redis set failed (key=%s): %s", key, e)
