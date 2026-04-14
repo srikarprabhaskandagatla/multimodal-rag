@@ -14,9 +14,10 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cpu \
     -r requirements.txt
 
-    COPY app/ ./app/
+COPY app/ ./app/
 COPY indexing/ ./indexing/
 COPY infra/ ./infra/
+COPY tests/ ./tests/
 
 RUN useradd -m -u 1000 raguser \
     && mkdir -p /app/data/faiss_index /app/model_cache /app/raw_dataset \

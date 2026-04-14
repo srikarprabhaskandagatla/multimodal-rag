@@ -1,13 +1,3 @@
-"""
-test_retriever.py — Unit Tests for the FAISS Retriever
-────────────────────────────────────────────────────────
-Run with:
-    pytest tests/test_retriever.py -v
-
-Tests use a tiny in-memory FAISS index (no disk I/O) and mock PostgreSQL,
-so they run without any external services.
-"""
-
 import pickle
 import tempfile
 from pathlib import Path
@@ -23,10 +13,6 @@ EMBEDDING_DIM = 512
 
 
 def _make_temp_index(num_docs: int = 10) -> tuple[str, list[str]]:
-    """
-    Build a tiny HNSW index with random vectors and write it to a temp directory.
-    Returns (index_dir_path, id_map).
-    """
     tmpdir = tempfile.mkdtemp()
     hnsw = faiss.IndexHNSWFlat(EMBEDDING_DIM, 16, faiss.METRIC_INNER_PRODUCT)
     index = faiss.IndexIDMap(hnsw)
@@ -59,10 +45,7 @@ def _fake_metadata(doc_ids: list[str]) -> list[dict]:
     ]
 
 
-# ── Tests ──────────────────────────────────────────────────────────────────────
-
 def test_retriever_loads_index():
-    """FAISSRetriever.load() should populate index and id_map from disk."""
     tmpdir, id_map = _make_temp_index(num_docs=10)
 
     retriever = FAISSRetriever()
@@ -75,7 +58,6 @@ def test_retriever_loads_index():
 
 
 def test_retriever_load_missing_index_raises():
-    """FAISSRetriever.load() should raise FileNotFoundError if index is absent."""
     retriever = FAISSRetriever()
     with patch.dict("os.environ", {"FAISS_INDEX_PATH": "/nonexistent/path"}):
         with pytest.raises(FileNotFoundError):
@@ -84,7 +66,6 @@ def test_retriever_load_missing_index_raises():
 
 @pytest.mark.asyncio
 async def test_retrieve_text_returns_top_k():
-    """retrieve(text=...) should return at most top_k results."""
     tmpdir, _ = _make_temp_index(num_docs=20)
 
     retriever = FAISSRetriever()
@@ -106,7 +87,6 @@ async def test_retrieve_text_returns_top_k():
 
 @pytest.mark.asyncio
 async def test_retrieve_multimodal_fuses_embeddings():
-    """retrieve(text=..., image=...) should call embed_query with both args."""
     from PIL import Image as PILImage
     dummy_image = PILImage.new("RGB", (224, 224))
 
@@ -129,7 +109,6 @@ async def test_retrieve_multimodal_fuses_embeddings():
 
 @pytest.mark.asyncio
 async def test_retrieve_returns_scores():
-    """Each result dict should include a 'score' field between 0 and 1."""
     tmpdir, _ = _make_temp_index(num_docs=10)
     retriever = FAISSRetriever()
     with patch.dict("os.environ", {"FAISS_INDEX_PATH": tmpdir, "FAISS_TOP_K": "10"}):
@@ -149,7 +128,6 @@ async def test_retrieve_returns_scores():
 
 @pytest.mark.asyncio
 async def test_retrieve_empty_db_returns_empty():
-    """If PostgreSQL returns no metadata, retrieve should return an empty list."""
     tmpdir, _ = _make_temp_index(num_docs=5)
     retriever = FAISSRetriever()
     with patch.dict("os.environ", {"FAISS_INDEX_PATH": tmpdir, "FAISS_TOP_K": "5"}):

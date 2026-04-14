@@ -1,0 +1,14 @@
+$ docker compose build app
+docker compose run --rm app sh -c "cd /app && PYTHONPATH=/app pytest tests/ -v"
+
+====================================================================================== test session starts ======================================================================================
+collected 6 items                                                                                                                                                                               
+
+tests/test_retriever.py::test_retriever_loads_index PASSED                                                                                                                                [ 16%]
+tests/test_retriever.py::test_retriever_load_missing_index_raises PASSED                                                                                                                  [ 33%]
+tests/test_retriever.py::test_retrieve_text_returns_top_k PASSED                                                                                                                          [ 50%]
+tests/test_retriever.py::test_retrieve_multimodal_fuses_embeddings PASSED                                                                                                                 [ 66%]
+tests/test_retriever.py::test_retrieve_returns_scores PASSED                                                                                                                              [ 83%]
+tests/test_retriever.py::test_retrieve_empty_db_returns_empty PASSED                                                                                                                      [100%]
+
+Truncated to show only test_retriever.py results. All tests passed successfully.

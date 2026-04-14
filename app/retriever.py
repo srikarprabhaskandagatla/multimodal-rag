@@ -20,8 +20,9 @@ class FAISSRetriever:
         self.id_map: list[str] = []  # Maps FAISS int ID → doc_id string
 
     def load(self):
-        index_file = Path(FAISS_INDEX_PATH) / "index.faiss"
-        idmap_file = Path(FAISS_INDEX_PATH) / "id_map.pkl"
+        index_dir = os.getenv("FAISS_INDEX_PATH", "/app/data/faiss_index")
+        index_file = Path(index_dir) / "index.faiss"
+        idmap_file = Path(index_dir) / "id_map.pkl"
 
         if not index_file.exists():
             raise FileNotFoundError(
