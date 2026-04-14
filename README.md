@@ -1,6 +1,53 @@
-# Multimodal RAG
+<h1 align="center">
+  <br>
+  Multimodal RAG
+  <br>
+</h1>
 
-A production-ready Retrieval-Augmented Generation system that searches a 50,000-document corpus using both text and images. Queries are embedded with CLIP, retrieved via FAISS HNSW, and answered by a LangChain agent backed by Azure OpenAI GPT-4o.
+<h4 align="center">A production-ready RAG system that searches a 50,000-document corpus using both text and images — embedded with CLIP, retrieved via FAISS HNSW, and answered by a LangChain agent backed by Azure OpenAI GPT-4o.</h4>
+
+<p align="center">
+  <a href="https://www.python.org/">
+    <img src="https://img.shields.io/badge/-Python-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python">
+  </a>
+  <a href="https://fastapi.tiangolo.com/">
+    <img src="https://img.shields.io/badge/-FastAPI-009688?style=flat-square&logo=fastapi&logoColor=white" alt="FastAPI">
+  </a>
+  <a href="https://openai.com/">
+    <img src="https://img.shields.io/badge/-GPT--4o-412991?style=flat-square&logo=openai&logoColor=white" alt="GPT-4o">
+  </a>
+  <a href="https://github.com/facebookresearch/faiss">
+    <img src="https://img.shields.io/badge/-FAISS%20HNSW-4267B2?style=flat-square&logo=meta&logoColor=white" alt="FAISS">
+  </a>
+  <a href="https://huggingface.co/openai/clip-vit-base-patch32">
+    <img src="https://img.shields.io/badge/-CLIP%20ViT--B%2F32-FFD21E?style=flat-square&logo=huggingface&logoColor=black" alt="CLIP">
+  </a>
+  <a href="https://www.docker.com/">
+    <img src="https://img.shields.io/badge/-Docker-2496ED?style=flat-square&logo=docker&logoColor=white" alt="Docker">
+  </a>
+  <a href="https://redis.io/">
+    <img src="https://img.shields.io/badge/-Redis-DC382D?style=flat-square&logo=redis&logoColor=white" alt="Redis">
+  </a>
+  <a href="https://www.postgresql.org/">
+    <img src="https://img.shields.io/badge/-PostgreSQL-4169E1?style=flat-square&logo=postgresql&logoColor=white" alt="PostgreSQL">
+  </a>
+</p>
+
+<p align="center">
+  <a href="#how-it-works">How It Works</a>
+  •
+  <a href="#repository-structure">Structure</a>
+  •
+  <a href="#design-choices">Design Choices</a>
+  •
+  <a href="#setup">Setup</a>
+  •
+  <a href="#indexing">Indexing</a>
+  •
+  <a href="#running-the-app">Running</a>
+  •
+  <a href="#api-endpoints">API</a>
+</p>
 
 ---
 
@@ -29,15 +76,15 @@ The selected tool calls `embed_query()`, which runs the query through CLIP (Cont
 
 CLIP runs locally via HuggingFace, loaded once per uvicorn worker process and cached in memory for its lifetime.
 
-### 4. Vector Search — FAISS HNSW
+### 4. Cache Check — Redis
+
+Before hitting FAISS, the system checks Redis for a cached result. The cache key is `rag:{SHA-256(query)[:16]}:{has_image}`. On a cache hit, the full result is returned immediately. On a miss, results are stored in Redis after retrieval with a 1-hour TTL.
+
+### 5. Vector Search — FAISS HNSW
 
 The 512-dim query vector is searched against the pre-built FAISS index using HNSW (Hierarchical Navigable Small World) approximate nearest neighbor search. HNSW returns the top-20 most similar document IDs in under 1ms.
 
 The FAISS index lives in-process — no network hop. Each document in the 50k corpus was embedded at index-build time and stored as an L2-normalized float32 vector.
-
-### 5. Cache Check — Redis
-
-Before hitting FAISS, the system checks Redis for a cached result. The cache key is `rag:{SHA-256(query)[:16]}:{has_image}`. On a cache hit, the full result is returned immediately. On a miss, results are stored in Redis after retrieval with a 1-hour TTL.
 
 ### 6. Metadata Fetch — PostgreSQL
 
@@ -140,7 +187,7 @@ Uvicorn should never be exposed directly to the internet. Nginx handles TLS term
 
 - Docker Desktop installed and running
 - `.env` file configured (see below)
-- FAISS index built (see Indexing section)
+- FAISS index built (see [Indexing](#indexing))
 
 ### Environment Variables (`.env`)
 
@@ -203,7 +250,9 @@ Services started:
 - `multimodal_rag_redis` — Redis on port 6379
 - `multimodal_rag_nginx` — Nginx on ports 80/443
 
-### API Endpoints
+---
+
+## API Endpoints
 
 | Method | Path | Description |
 |---|---|---|
