@@ -1,23 +1,3 @@
-"""
-main.py — FastAPI Application Entrypoint
-──────────────────────────────────────────
-WHY FASTAPI (and not Flask, Django, or aiohttp)?
-
-- Flask: synchronous by default. Async support via asyncio is bolted on and
-  requires explicit async context management. FAISS + Redis + PostgreSQL all
-  benefit from async I/O — Flask would block the worker thread during each op.
-
-- Django: heavyweight ORM and middleware stack. We already have SQLAlchemy for
-  async PostgreSQL. Django's ORM doesn't support asyncpg natively in 2.x.
-
-- aiohttp: low-level async HTTP server. No request validation, no automatic
-  OpenAPI docs, no dependency injection. We'd reimplement FastAPI features.
-
-- FastAPI: async-first, Pydantic-validated request/response models, automatic
-  OpenAPI schema at /docs, and Depends() injection for the retriever singleton.
-  The correct choice for a production async ML-serving API.
-"""
-
 import io
 import logging
 from contextlib import asynccontextmanager
@@ -36,15 +16,10 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-# ── Lifespan (startup / shutdown hooks) ───────────────────────────────────────
-# Why lifespan and not @app.on_event("startup")?
-# @app.on_event is deprecated in FastAPI 0.93+. Lifespan context managers are
-# the current standard and work correctly with pytest's async test fixtures.
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Loading FAISS index into memory...")
-    get_retriever()  # Eagerly load index at startup — not on first request
+    get_retriever()  
     logger.info("FAISS index loaded. Application ready.")
     yield
     logger.info("Shutting down...")
@@ -57,16 +32,13 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS: locked down to internal cluster origins in production
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # Restrict to specific origins in production
+    allow_origins=["*"],   
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
-
-# ── Request / Response Schemas ─────────────────────────────────────────────────
 
 class QueryRequest(BaseModel):
     query: str
@@ -88,15 +60,8 @@ class AgentResponse(BaseModel):
     results: list[RetrievalResult] | None = None
 
 
-# ── Endpoints ──────────────────────────────────────────────────────────────────
-
 @app.get("/health")
 async def health():
-    """
-    Health check endpoint.
-    Unity cluster load balancers poll this every 30s to determine instance health.
-    Returns 200 only when FAISS index is loaded and retriever is ready.
-    """
     retriever = get_retriever()
     if retriever.index is None:
         raise HTTPException(status_code=503, detail="FAISS index not loaded")
@@ -105,10 +70,6 @@ async def health():
 
 @app.post("/query/text", response_model=AgentResponse)
 async def query_text(request: QueryRequest):
-    """
-    Text-only query endpoint.
-    Routes through the LangChain agent which will call text_retriever_tool.
-    """
     try:
         result = await run_agent(
             query=request.query,
@@ -125,17 +86,6 @@ async def query_multimodal(
     query: str = Form(default=""),
     image: UploadFile = File(default=None),
 ):
-    """
-    Multimodal query endpoint — accepts text + optional image.
-
-    Why multipart/form-data instead of JSON?
-    JSON cannot encode binary image data efficiently (base64 bloats by 33%).
-    multipart/form-data is the HTTP standard for mixed text+binary payloads.
-
-    Why UploadFile and not bytes?
-    UploadFile streams the file without loading it entirely into memory first.
-    For large images, this avoids OOM on the API server.
-    """
     pil_image = None
     if image:
         contents = await image.read()
@@ -144,9 +94,6 @@ async def query_multimodal(
         except Exception:
             raise HTTPException(status_code=400, detail="Invalid image file")
 
-    # For multimodal queries, we bypass the agent and call retriever directly
-    # to avoid the LLM overhead when the routing decision is already made
-    # (user explicitly hit the /multimodal endpoint).
     cached = await get_cached(text=query or None, has_image=pil_image is not None)
     if cached:
         return AgentResponse(answer="Retrieved from cache.", tool_calls=[], results=cached)
@@ -168,7 +115,6 @@ async def query_multimodal(
 
 @app.get("/index/stats")
 async def index_stats():
-    """Returns FAISS index statistics for monitoring."""
     retriever = get_retriever()
     return {
         "total_vectors": retriever.index.ntotal if retriever.index else 0,

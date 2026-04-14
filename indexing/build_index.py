@@ -1,34 +1,7 @@
-"""
-build_index.py — Offline FAISS Index Builder
-──────────────────────────────────────────────
-Run this ONCE before starting the API server to:
-  1. Load your document corpus (text + images)
-  2. Embed every document with CLIP
-  3. Build a FAISS HNSW index
-  4. Insert document metadata into PostgreSQL
-  5. Save index.faiss + id_map.pkl to FAISS_INDEX_PATH
-
-Usage:
-    python indexing/build_index.py
-
-Expected corpus format (JSONL, one document per line):
-    {"doc_id": "doc_001", "title": "...", "source": "...", "doc_type": "text",
-     "content": "...", "image_path": null}
-    {"doc_id": "doc_002", "title": "...", "source": "...", "doc_type": "image",
-     "content": "", "image_path": "/data/images/doc_002.jpg"}
-
-WHY HNSW (not IVF or Flat)?
-- IndexFlatIP: exact search, O(n) per query. At 50k docs × 100 QPS = 5M dot
-  products/sec. Fine for <10k docs; too slow beyond that.
-- IndexIVFFlat: requires training (k-means clustering). Good for >1M vectors.
-  At 50k, the overhead isn't justified.
-- IndexHNSWFlat: approximate nearest neighbor with ~99% recall at <1ms. No
-  training required. Optimal for the 10k-500k range.
-"""
-
 import asyncio
 import json
 import logging
+import math
 import os
 import pickle
 from io import BytesIO
@@ -42,7 +15,6 @@ from PIL import Image
 
 load_dotenv()
 
-# Must import after dotenv so env vars are set before module-level reads
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -54,28 +26,23 @@ logger = logging.getLogger(__name__)
 
 FAISS_INDEX_PATH = os.getenv("FAISS_INDEX_PATH", "/app/data/faiss_index")
 CORPUS_PATH = os.getenv("CORPUS_PATH", "data/corpus.jsonl")
-EMBEDDING_DIM = 512   # CLIP ViT-B/32 output dimension
-HNSW_M = 32          # HNSW connectivity parameter — higher = better recall, more memory
-BATCH_SIZE = 64       # Documents embedded per batch (tune to GPU memory)
+EMBEDDING_DIM = 512   
+HNSW_M = 32          
+BATCH_SIZE = 64       
+
+CHUNK_INDEX = int(os.getenv("CHUNK_INDEX", "0"))
+CHUNK_TOTAL = int(os.getenv("CHUNK_TOTAL", "1"))
 
 
 def build_faiss_index(dim: int) -> faiss.Index:
-    """
-    Create an HNSW index wrapped in IndexIDMap so we can use arbitrary int IDs.
-
-    Why IndexIDMap?
-    HNSW natively uses sequential integer IDs (0, 1, 2, ...). IndexIDMap lets
-    us assign explicit int64 IDs that map to our doc_id strings via id_map.
-    """
     hnsw = faiss.IndexHNSWFlat(dim, HNSW_M, faiss.METRIC_INNER_PRODUCT)
-    hnsw.hnsw.efConstruction = 200  # Higher = better graph quality at build time
-    hnsw.hnsw.efSearch = 64         # Higher = better recall at query time
+    hnsw.hnsw.efConstruction = 200  
+    hnsw.hnsw.efSearch = 64        
     index = faiss.IndexIDMap(hnsw)
     return index
 
 
 def _fetch_image(url: str) -> Image.Image | None:
-    """Fetch image from URL, return PIL Image or None on failure."""
     try:
         resp = requests.get(url, timeout=8, headers={"User-Agent": "multimodal-rag/1.0"})
         if resp.status_code == 200:
@@ -86,10 +53,6 @@ def _fetch_image(url: str) -> Image.Image | None:
 
 
 async def embed_document(doc: dict) -> np.ndarray | None:
-    """
-    Embed a single document. Returns None if embedding fails (skip, don't crash).
-    Supports both local image_path and remote image_url.
-    """
     try:
         text = doc.get("content") or doc.get("title") or None
         image = None
@@ -118,11 +81,21 @@ async def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     index = build_faiss_index(EMBEDDING_DIM)
-    id_map: list[str] = []   # id_map[i] = doc_id string for FAISS integer ID i
+    id_map: list[str] = []   
 
     logger.info("Loading corpus from %s ...", corpus_path)
     with open(corpus_path) as f:
-        docs = [json.loads(line) for line in f if line.strip()]
+        all_docs = [json.loads(line) for line in f if line.strip()]
+
+    if CHUNK_TOTAL > 1:
+        chunk_size = math.ceil(len(all_docs) / CHUNK_TOTAL)
+        start = CHUNK_INDEX * chunk_size
+        end = min(start + chunk_size, len(all_docs))
+        docs = all_docs[start:end]
+        logger.info("Chunk %d/%d — processing docs %d..%d (%d total)",
+                    CHUNK_INDEX, CHUNK_TOTAL - 1, start, end - 1, len(docs))
+    else:
+        docs = all_docs
     logger.info("Loaded %d documents", len(docs))
 
     vectors = []
@@ -139,9 +112,7 @@ async def main():
         vectors.append(vec.astype(np.float32))
         faiss_ids.append(faiss_int_id)
 
-        # Collect metadata for PostgreSQL batch insert
         content = doc.get("content", "")
-        # Keep image_url in metadata so the API can return it to the frontend
         extra_meta = doc.get("metadata", {})
         if doc.get("image_url"):
             extra_meta["image_url"] = doc["image_url"]
@@ -155,13 +126,11 @@ async def main():
         })
 
         if (i + 1) % BATCH_SIZE == 0:
-            # Add batch to FAISS
             batch_vecs = np.stack(vectors[-BATCH_SIZE:])
             batch_ids = np.array(faiss_ids[-BATCH_SIZE:], dtype=np.int64)
             index.add_with_ids(batch_vecs, batch_ids)
             logger.info("Indexed %d / %d documents", i + 1, len(docs))
 
-    # Add remaining documents
     remainder = len(vectors) % BATCH_SIZE
     if remainder:
         batch_vecs = np.stack(vectors[-remainder:])
@@ -170,13 +139,11 @@ async def main():
 
     logger.info("FAISS index built: %d vectors", index.ntotal)
 
-    # Save FAISS index and id_map
     faiss.write_index(index, str(output_dir / "index.faiss"))
     with open(output_dir / "id_map.pkl", "wb") as f:
         pickle.dump(id_map, f)
     logger.info("Saved index to %s", output_dir)
 
-    # Insert metadata into PostgreSQL
     logger.info("Inserting %d documents into PostgreSQL ...", len(db_inserts))
     for doc_meta in db_inserts:
         await insert_document(**doc_meta)

@@ -1,0 +1,60 @@
+version: "3.9"
+
+services:
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: multimodal_rag_postgres_init
+    restart: "no"
+    env_file:
+      - .env
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/postgre_init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - rag_net
+
+  indexer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: multimodal_rag_indexer
+    restart: "no"
+    command: ["sh", "-c", "python indexing/build_index.py 2>&1 | tee /app/logs/indexer.log"]
+    env_file:
+      - .env
+    environment:
+      CORPUS_PATH: /app/raw_dataset/corpus.jsonl
+      FAISS_INDEX_PATH: /app/data/faiss_index
+      TRANSFORMERS_CACHE: /app/model_cache
+      HF_HOME: /app/model_cache
+      POSTGRES_HOST: postgres
+      CHUNK_TOTAL: "1"
+      CHUNK_INDEX: "0"
+    volumes:
+      - ./raw_dataset/faiss_index:/app/data/faiss_index
+      - model_cache:/app/model_cache
+      - ./raw_dataset/data:/app/raw_dataset:ro
+      - ./raw_dataset/logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - rag_net
+
+volumes:
+  model_cache:
+  postgres_data:
+
+networks:
+  rag_net:
+    driver: bridge

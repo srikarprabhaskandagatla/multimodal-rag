@@ -1,31 +1,3 @@
-"""
-retriever.py — FAISS Vector Retrieval
-───────────────────────────────────────
-WHY FAISS (and not Pinecone, Weaviate, Chroma, Milvus, or pgvector)?
-
-- FAISS (Facebook AI Similarity Search) runs entirely in-process. No network
-  hop = microsecond latency on the retrieval step itself.
-
-- Pinecone/Weaviate are managed cloud services. On Unity (AWS EC2), every query
-  would add ~50-100ms of network RTT plus egress cost. Disqualified.
-
-- Chroma: excellent for prototyping, but single-threaded and lacks production
-  ANN algorithms (HNSW, IVF) that FAISS has tuned for years.
-
-- pgvector: PostgreSQL extension for vector similarity. Excellent for small
-  corpora (<100k), but at 50k docs with 512-dim CLIP vectors it's 10-30x slower
-  than FAISS's HNSW due to sequential scan fallback.
-
-- Milvus: production-grade, but requires a separate cluster deployment.
-  FAISS embedded in-process is simpler and sufficient at 50k scale.
-
-INDEX TYPE: IndexHNSWFlat
-  - HNSW (Hierarchical Navigable Small World) gives ~99% recall at <1ms query
-    time for 50k vectors of 512 dims.
-  - IndexFlatIP (exact search) would be more accurate but O(n) — at 50k docs
-    and 100 QPS that's 5M dot products per second. HNSW is O(log n).
-"""
-
 import os
 import pickle
 from pathlib import Path
@@ -43,23 +15,11 @@ EMBEDDING_DIM = 512  # CLIP ViT-B/32 output dimension
 
 
 class FAISSRetriever:
-    """
-    Wraps a FAISS HNSW index with doc ID mapping and async retrieval interface.
-    """
-
     def __init__(self):
         self.index: faiss.Index | None = None
         self.id_map: list[str] = []  # Maps FAISS int ID → doc_id string
 
     def load(self):
-        """
-        Load pre-built FAISS index from disk.
-
-        Why load at startup (not lazily)?
-        The HNSW graph structure is ~200MB. Loading it on the first request
-        would add 3-5 seconds of latency to that request. Loading at startup
-        amortizes this cost before any traffic arrives.
-        """
         index_file = Path(FAISS_INDEX_PATH) / "index.faiss"
         idmap_file = Path(FAISS_INDEX_PATH) / "id_map.pkl"
 
@@ -79,15 +39,6 @@ class FAISSRetriever:
         image=None,
         top_k: int = 5,
     ) -> list[dict[str, Any]]:
-        """
-        Embed query → search FAISS → fetch metadata → return results.
-
-        top_k pipeline:
-        We retrieve FAISS_TOP_K=20 candidates, fetch their full metadata from
-        PostgreSQL, then return top_k=5 after any post-retrieval reranking.
-        This two-stage approach (ANN → rerank) is standard practice because
-        ANN search sacrifices some recall for speed.
-        """
         if self.index is None:
             self.load()
 
@@ -122,9 +73,6 @@ class FAISSRetriever:
         docs.sort(key=lambda d: d["score"], reverse=True)
         return docs[:top_k]
 
-
-# Singleton — shared across all requests in a worker process
-# Why singleton? FAISS index is 200MB. One per process, not one per request.
 _retriever_instance: FAISSRetriever | None = None
 
 
