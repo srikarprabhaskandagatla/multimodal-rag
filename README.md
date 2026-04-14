@@ -4,7 +4,7 @@
   <br>
 </h1>
 
-<h4 align="center">A production-ready RAG system that searches a 50,000-document corpus using both text and images - embedded with CLIP, retrieved via FAISS HNSW, and answered by a LangChain agent backed by Azure OpenAI GPT-4o.</h4>
+<h4 align="center">A production-ready RAG system that searches a 50,000-document corpus using both text and images — embedded with CLIP, retrieved via FAISS HNSW, and answered by a LangChain agent backed by Azure OpenAI GPT-4o.</h4>
 
 <p align="center">
   <a href="https://www.python.org/">
@@ -53,20 +53,20 @@
 
 ## How It Works
 
-### 1. Query Intake - FastAPI
+### 1. Query Intake — FastAPI
 
 The user sends a request to one of two endpoints: `/query/text` for a text-only query, or `/query/multimodal` for a query that includes an image. FastAPI validates the request with Pydantic and passes it to the LangChain agent.
 
-### 2. Routing - LangChain Agent with GPT-4o
+### 2. Routing — LangChain Agent with GPT-4o
 
 The agent receives the query and uses GPT-4o's function-calling API to decide which retrieval tool to invoke:
 - Text-only query → `text_retriever_tool`
 - Image with no text → `image_retriever_tool`
 - Both text and image → `multimodal_retriever_tool`
 
-Function calling is used instead of prompt-based routing because it forces the model to emit a structured JSON tool name rather than free text - making routing deterministic and schema-validated.
+Function calling is used instead of prompt-based routing because it forces the model to emit a structured JSON tool name rather than free text — making routing deterministic and schema-validated.
 
-### 3. Embedding - CLIP ViT-B/32
+### 3. Embedding — CLIP ViT-B/32
 
 The selected tool calls `embed_query()`, which runs the query through CLIP (Contrastive Language-Image Pretraining). CLIP encodes both text and images into the same 512-dimensional vector space, which is the property that makes cross-modal retrieval possible.
 
@@ -76,21 +76,21 @@ The selected tool calls `embed_query()`, which runs the query through CLIP (Cont
 
 CLIP runs locally via HuggingFace, loaded once per uvicorn worker process and cached in memory for its lifetime.
 
-### 4. Cache Check - Redis
+### 4. Cache Check — Redis
 
 Before hitting FAISS, the system checks Redis for a cached result. The cache key is `rag:{SHA-256(query)[:16]}:{has_image}`. On a cache hit, the full result is returned immediately. On a miss, results are stored in Redis after retrieval with a 1-hour TTL.
 
-### 5. Vector Search - FAISS HNSW
+### 5. Vector Search — FAISS HNSW
 
 The 512-dim query vector is searched against the pre-built FAISS index using HNSW (Hierarchical Navigable Small World) approximate nearest neighbor search. HNSW returns the top-20 most similar document IDs in under 1ms.
 
-The FAISS index lives in-process - no network hop. Each document in the 50k corpus was embedded at index-build time and stored as an L2-normalized float32 vector.
+The FAISS index lives in-process — no network hop. Each document in the 50k corpus was embedded at index-build time and stored as an L2-normalized float32 vector.
 
-### 6. Metadata Fetch - PostgreSQL
+### 6. Metadata Fetch — PostgreSQL
 
 FAISS returns integer IDs. These are mapped back to `doc_id` strings via `id_map.pkl`, then a single `WHERE doc_id = ANY(...)` query fetches full metadata (title, source, doc_type, content preview, flexible JSONB metadata) from PostgreSQL.
 
-### 7. Answer Synthesis - GPT-4o
+### 7. Answer Synthesis — GPT-4o
 
 The retrieved documents are passed back to the LangChain agent, which synthesizes a grounded natural-language answer citing the relevant `doc_id` and source fields. The agent never fabricates information not present in the retrieved documents.
 
@@ -109,8 +109,9 @@ multimodal-rag/
 │   └── db.py            # PostgreSQL async metadata store (asyncpg/SQLAlchemy)
 │
 ├── indexing/
-│   ├── build_index.py       # CPU indexer - used by Docker (single container)
-│   ├── build_index_gpu.py   # GPU indexer - used on HPC (SLURM sbatch)
+│   ├── build_index.py       # CPU indexer — used by Docker (single container)
+│   ├── build_index_gpu.py   # GPU indexer — used on HPC (SLURM sbatch)
+│   ├── insert_postgres.py   # Standalone DB insert — use after GPU indexing
 │   └── slurm_index.sh       # SLURM job script for HPC GPU node
 │
 ├── infra/
@@ -145,13 +146,13 @@ multimodal-rag/
 
 CLIP (Contrastive Language-Image Pretraining) is the only off-the-shelf model that maps **both text and images into the same vector space**. This is what makes cross-modal retrieval work: the text query "a dog running on a beach" and a photo of that scene will be geometrically close in CLIP space. Text-only models (SBERT, OpenAI text-embedding-3) have no image tower and are disqualified for this use case.
 
-We use `openai/clip-vit-base-patch32` via HuggingFace - runs locally, no per-call API cost, weights cached on first load.
+We use `openai/clip-vit-base-patch32` via HuggingFace — runs locally, no per-call API cost, weights cached on first load.
 
 ### Why FAISS HNSW (not Pinecone, pgvector, or Chroma)?
 
 | Option | Latency | Why not |
 |---|---|---|
-| FAISS HNSW (in-process) | ~1ms | **Used** - zero network hop |
+| FAISS HNSW (in-process) | ~1ms | **Used** — zero network hop |
 | Pinecone / Weaviate | ~50-100ms | Network RTT + egress cost |
 | pgvector | ~10-30ms | Sequential scan fallback at 50k scale |
 | Chroma | ~5ms | Single-threaded, no production ANN |
@@ -161,7 +162,7 @@ HNSW gives ~99% recall at O(log n) query time. For 50k × 512-dim vectors it fit
 
 ### Why LangChain agent with function calling?
 
-The agent routes queries to one of three tools based on modality. Function calling (OpenAI tool_use API) forces the model to emit structured JSON with a typed tool name - no fragile ReAct prompt parsing. GPT-4o misroutes <5% of queries; GPT-3.5-turbo misroutes ~18%.
+The agent routes queries to one of three tools based on modality. Function calling (OpenAI tool_use API) forces the model to emit structured JSON with a typed tool name — no fragile ReAct prompt parsing. GPT-4o misroutes <5% of queries; GPT-3.5-turbo misroutes ~18%.
 
 ### Why FastAPI (not Flask or Django)?
 
@@ -206,9 +207,11 @@ AZURE_OPENAI_API_VERSION=2024-02-01
 
 ## Indexing
 
-The FAISS index must be built **once** before starting the app.
+The FAISS index must be built **once** before starting the app. Choose one option.
 
-### Option A - Docker (CPU, ~1 hour for 50k docs)
+### Option A — Docker CPU (~1 hour for 50k docs)
+
+Embeds the corpus, builds the FAISS index, and populates PostgreSQL in a single step:
 
 ```bash
 docker compose -f docker-compose.indexer.yaml up --build
@@ -216,23 +219,36 @@ docker compose -f docker-compose.indexer.yaml up --build
 
 Wait for: `Done. 50000 documents indexed and stored.`
 
-The index writes to `raw_dataset/faiss_index/` on your host via bind mount. Also populates PostgreSQL with document metadata.
+The index writes to `raw_dataset/faiss_index/` on your host via bind mount.
 
-### Option B - HPC GPU (15-20 minutes on V100/A100)
+### Option B — HPC GPU (~15-20 minutes on V100/A100)
+
+**Step 1** — Submit the SLURM job on the HPC login node:
 
 ```bash
-# On HPC login node
 sbatch indexing/slurm_index.sh
 ```
 
-After it finishes, copy the two output files back to your laptop:
+Wait for: `Done. 50000 documents indexed.`
+
+**Step 2** — Copy the index files back to your laptop:
 
 ```bash
-scp hpc:/path/to/project/faiss_index/index.faiss raw_dataset/faiss_index/
-scp hpc:/path/to/project/faiss_index/id_map.pkl  raw_dataset/faiss_index/
+scp user@hpc:/path/to/project/faiss_index/index.faiss raw_dataset/faiss_index/
+scp user@hpc:/path/to/project/faiss_index/id_map.pkl  raw_dataset/faiss_index/
 ```
 
-> **Note:** The GPU indexer does **not** insert metadata into PostgreSQL. After copying the index back, run the Docker indexer once to populate the database before starting the main app stack.
+**Step 3** — Populate PostgreSQL (the GPU indexer skips this step):
+
+```bash
+docker compose -f docker-compose.indexer.yaml up postgres -d
+docker compose -f docker-compose.indexer.yaml run --rm indexer \
+    python indexing/insert_postgres.py
+```
+
+Wait for: `Done. 50000 documents inserted into PostgreSQL.`
+
+> **Important:** Never run `build_index.py` after copying HPC index files — it will overwrite them. Use `insert_postgres.py` to populate the DB independently.
 
 ---
 
@@ -245,10 +261,17 @@ docker compose up --build
 ```
 
 Services started:
-- `multimodal_rag_app` - FastAPI on port 8000
-- `multimodal_rag_postgres` - PostgreSQL on port 5432
-- `multimodal_rag_redis` - Redis on port 6379
-- `multimodal_rag_nginx` - Nginx on ports 80/443
+- `multimodal_rag_app` — FastAPI on port 8000
+- `multimodal_rag_postgres` — PostgreSQL on port 5432
+- `multimodal_rag_redis` — Redis on port 6379
+- `multimodal_rag_nginx` — Nginx on ports 80/443
+
+Confirm the app is healthy:
+
+```bash
+curl http://localhost/health
+# {"status": "ok", "index_size": 50000}
+```
 
 ---
 
@@ -256,7 +279,7 @@ Services started:
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/health` | Health check - returns FAISS index size |
+| `GET` | `/health` | Health check — returns FAISS index size |
 | `POST` | `/query/text` | Text query → agent → grounded answer |
 | `POST` | `/query/multimodal` | Text + image → direct retrieval |
 | `GET` | `/index/stats` | FAISS index statistics |
@@ -267,7 +290,19 @@ Services started:
 ```bash
 curl -X POST http://localhost/query/text \
   -H "Content-Type: application/json" \
-  -d '{"query": "satellite images of urban sprawl"}'
+  -d '{"query": "what is Frankenstein about"}'
+```
+
+```json
+{
+  "answer": "\"Frankenstein; Or, The Modern Prometheus\" by Mary Wollstonecraft Shelley is a Gothic novel written in 1818. It tells the story of Victor Frankenstein, a scientist who creates a sentient creature through an unorthodox experiment. The novel explores themes of ambition, the consequences of playing God, and the isolation and suffering of both the creator and his creation.\n\nFor more details, you can access the full text here (doc_id: doc_00092, source: Gutenberg).",
+  "tool_calls": [
+    {
+      "tool": "text_retriever_tool",
+      "input": {"query": "Frankenstein plot summary"}
+    }
+  ]
+}
 ```
 
 ### Example: Multimodal Query
@@ -282,7 +317,7 @@ curl -X POST http://localhost/query/multimodal \
 
 ## Corpus Format
 
-`raw_dataset/data/corpus.jsonl` - one JSON object per line:
+`raw_dataset/data/corpus.jsonl` — one JSON object per line:
 
 ```jsonl
 {"doc_id": "doc_00001", "title": "Urban Growth Study", "source": "arxiv", "doc_type": "text", "content": "...", "image_url": null}
