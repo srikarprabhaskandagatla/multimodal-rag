@@ -1,5 +1,4 @@
 .env
-data/
 model_cache/
 __pycache__/
 *.pyc
