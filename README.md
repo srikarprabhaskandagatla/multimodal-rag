@@ -207,21 +207,24 @@ AZURE_OPENAI_API_VERSION=2024-02-01
 
 ## Indexing
 
-The FAISS index must be built **once** before starting the app. Choose one option.
+The FAISS index must be built **once** before starting the app. The corpus and index files are large (hundreds of MBs) and are excluded from the repository via `.gitignore` — you must generate them locally using one of the options below.
 
 ### Option A — Docker CPU (~1 hour for 50k docs)
 
-Embeds the corpus, builds the FAISS index, and populates PostgreSQL in a single step:
+Does everything in one step: embeds the corpus, builds the FAISS index, and populates PostgreSQL.
 
 ```bash
+# 1. Build the index and populate the database
 docker compose -f docker-compose.indexer.yaml up --build
 ```
 
 Wait for: `Done. 50000 documents indexed and stored.`
 
-The index writes to `raw_dataset/faiss_index/` on your host via bind mount.
+The index writes to `raw_dataset/faiss_index/` on your host via bind mount. Then skip to [Running the App](#running-the-app).
 
 ### Option B — HPC GPU (~15-20 minutes on V100/A100)
+
+Use this if you have access to a GPU cluster via SLURM. The GPU indexer (`build_index_gpu.py`) only builds the FAISS index — it does **not** populate PostgreSQL, so there is a separate step for that.
 
 **Step 1** — Submit the SLURM job on the HPC login node:
 
@@ -231,14 +234,14 @@ sbatch indexing/slurm_index.sh
 
 Wait for: `Done. 50000 documents indexed.`
 
-**Step 2** — Copy the index files back to your laptop:
+**Step 2** — Copy the two output files back to your laptop:
 
 ```bash
 scp user@hpc:/path/to/project/faiss_index/index.faiss raw_dataset/faiss_index/
 scp user@hpc:/path/to/project/faiss_index/id_map.pkl  raw_dataset/faiss_index/
 ```
 
-**Step 3** — Populate PostgreSQL (the GPU indexer skips this step):
+**Step 3** — Populate PostgreSQL using the standalone insert script (reads `corpus.jsonl` directly, no re-embedding):
 
 ```bash
 docker compose -f docker-compose.indexer.yaml up postgres -d
@@ -248,7 +251,7 @@ docker compose -f docker-compose.indexer.yaml run --rm indexer \
 
 Wait for: `Done. 50000 documents inserted into PostgreSQL.`
 
-> **Important:** Never run `build_index.py` after copying HPC index files — it will overwrite them. Use `insert_postgres.py` to populate the DB independently.
+> **Important:** Do not run `build_index.py` after copying the HPC index files — it re-embeds the entire corpus and overwrites `index.faiss`. Use `insert_postgres.py` to populate the database independently.
 
 ---
 
