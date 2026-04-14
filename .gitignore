@@ -5,4 +5,5 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 logs/
-raw_dataset/
+raw_dataset/data
+raw_dataset/model_cache
