@@ -18,11 +18,11 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Loading FAISS index into memory...")
+    logger.info("Loading FAISS index into Memory.")
     get_retriever()  
-    logger.info("FAISS index loaded. Application ready.")
+    logger.info("FAISS Index Loaded Successfully. Application is Ready.")
     yield
-    logger.info("Shutting down...")
+    logger.info("Shutting Down!")
 
 
 app = FastAPI(

@@ -17,7 +17,7 @@ EMBEDDING_DIM = 512  # CLIP ViT-B/32 output dimension
 class FAISSRetriever:
     def __init__(self):
         self.index: faiss.Index | None = None
-        self.id_map: list[str] = []  # Maps FAISS int ID → doc_id string
+        self.id_map: list[str] = []  # Maps FAISS int ID to doc_id string
 
     def load(self):
         index_dir = os.getenv("FAISS_INDEX_PATH", "/app/data/faiss_index")
@@ -48,7 +48,7 @@ class FAISSRetriever:
         query_vec = query_vec.reshape(1, -1).astype(np.float32)
 
         # 2. ANN search in FAISS
-        # faiss.search returns (distances, indices) — distances are cosine
+        # faiss.search returns (distances, indices) - distances are cosine
         # similarities (since vectors are L2-normalized + IndexFlatIP)
         distances, indices = self.index.search(query_vec, TOP_K)
 

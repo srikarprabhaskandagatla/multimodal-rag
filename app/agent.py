@@ -33,7 +33,6 @@ TOOLS = [text_retriever_tool, image_retriever_tool, multimodal_retriever_tool]
 
 @tool
 async def text_retriever_tool(query: str) -> str:
-    """Retrieve documents from the corpus using a text query."""
     cached = await get_cached(text=query, has_image=False)
     if cached:
         return json.dumps(cached)
@@ -46,7 +45,6 @@ async def text_retriever_tool(query: str) -> str:
 
 @tool
 async def image_retriever_tool(image_description: str) -> str:
-    """Retrieve documents from the corpus using an image description."""
     cached = await get_cached(text=image_description, has_image=True)
     if cached:
         return json.dumps(cached)
